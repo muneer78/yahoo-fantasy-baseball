@@ -904,6 +904,8 @@ def format_today(groups, probable_starters, team_name="", fmt="text",
             }
             if is_probable:
                 entry["probable_starter"] = True
+            elif "SP" in (entry["positions"] or "").split(","):
+                entry["probable_starter"] = False
             return entry
 
         result = {"team": team_name, "date": date_str or today_str,
@@ -946,6 +948,8 @@ def format_today(groups, probable_starters, team_name="", fmt="text",
                 extra = ""
                 if name in probable_starters:
                     extra = " [PROBABLE STARTER]"
+                elif "SP" in (pos or "").split(","):
+                    extra = " [NOT STARTING]"
                 if status:
                     extra += f" ({status})"
                 lines.append(f"    {name:<22} {pos:<14} {team:<5}{opp_time:<18}{extra}")
@@ -982,8 +986,13 @@ def format_optimize(suggestions, fmt="text"):
     lines.append(f"  LINEUP SWAPS ({len(swaps)} suggested)")
     if swaps:
         for s in swaps:
-            lines.append(f"    Swap {s['bench_player']} ({s['bench_slot']}, {s['bench_team']} playing)")
-            lines.append(f"      ↔  {s['active_player']} ({s['active_slot']}, {s['active_team']} off)")
+            reason = s.get("reason", "")
+            if "bench_score" in s:
+                lines.append(f"    {s['bench_player']} (BN, {s['bench_team']}, score: {s['bench_score']})")
+                lines.append(f"      ↔  {s['active_player']} ({s['active_slot']}, {s['active_team']}, score: {s['active_score']})")
+            else:
+                lines.append(f"    {s['bench_player']} (BN, {s['bench_team']} playing)")
+                lines.append(f"      ↔  {s['active_player']} ({s['active_slot']}, {s['active_team']} off)")
     else:
         lines.append("    No swaps needed — lineup looks good.")
 

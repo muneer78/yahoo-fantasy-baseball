@@ -281,9 +281,11 @@ Today — Team Name
 Roster Optimization Suggestions
 ==================================================
 
-  LINEUP SWAPS (1 suggested)
-    Swap Jake Burger (BN, MIA playing)
+  LINEUP SWAPS (2 suggested)
+    Jake Burger (BN, MIA playing)
       ↔  Mookie Betts (SS, LAD off)
+    Aaron Judge (BN, NYY, score: 20.5)
+      ↔  Willy Adames (UTIL, SF, score: 1.3)
 
   PITCHER ROTATION (1 alerts)
     Gerrit Cole (NYY) is a probable starter today but is on the bench.
@@ -291,7 +293,7 @@ Roster Optimization Suggestions
   IL MANAGEMENT (1 suggested)
     Move Zack Wheeler (IL-60) from SP slot to IL to free a roster spot.
 
-Total: 3 suggestion(s)
+Total: 4 suggestion(s)
 ```
 
 **scoreboard:**
