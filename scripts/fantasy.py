@@ -935,6 +935,214 @@ def _pitcher_names_match(roster_name, mlb_name):
     return False
 
 
+# ---------------------------------------------------------------------------
+# Optimal batter lineup solver
+# ---------------------------------------------------------------------------
+
+_PITCHER_SLOTS = {"SP", "RP", "P"}
+_NON_ACTIVE_SLOTS = {"BN", "IL", "IL+", "DL", "DL+"}
+
+
+def _count_active_batter_slots(roster):
+    """Infer active batter slot counts from the current roster.
+
+    Returns a flat list like ["C", "1B", "2B", "3B", "SS", "OF", "OF", "OF", "UTIL"].
+    """
+    slots = []
+    for player in roster:
+        slot = formatters._player_selected_position(player).upper()
+        if slot in _NON_ACTIVE_SLOTS or slot in _PITCHER_SLOTS:
+            continue
+        if slot and slot not in ("", "NA"):
+            slots.append(slot)
+    return slots
+
+
+def _effective_score(player, teams_playing):
+    """Return a batter's effective score for today (0 if team not playing)."""
+    import mlb_client
+    team = mlb_client.normalize_team_abbr(formatters._player_team(player))
+    if team and team not in teams_playing:
+        return 0.0
+    return player.get("_opt_score", 0.0)
+
+
+def _can_fill_slot(player, slot):
+    """Check if a batter can fill a given roster slot."""
+    if slot == "UTIL":
+        return True
+    positions = formatters._player_position(player).upper().split(",")
+    return slot in positions
+
+
+def _solve_optimal_lineup(batters, slots, teams_playing):
+    """Backtracking solver: assign batters to slots maximizing total effective score.
+
+    Returns {player_id: slot} for all batters assigned to active slots.
+    """
+    if not slots or not batters:
+        return {}
+
+    # Pre-compute effective scores
+    scores = {}
+    for p in batters:
+        pid = formatters._player_id(p)
+        scores[pid] = _effective_score(p, teams_playing)
+
+    # Pre-compute eligibility: for each slot index, which player indices can fill it
+    eligible = []
+    for slot in slots:
+        elig = []
+        for i, p in enumerate(batters):
+            if _can_fill_slot(p, slot):
+                elig.append(i)
+        eligible.append(elig)
+
+    # Sort slots by constraint level (fewest eligible players first, UTIL last)
+    slot_order = sorted(range(len(slots)), key=lambda i: (
+        1 if slots[i] == "UTIL" else 0,  # UTIL last
+        len(eligible[i]),                  # fewest eligible first
+    ))
+
+    # Pre-compute sorted scores for upper-bound pruning
+    all_scores_desc = sorted(scores.values(), reverse=True)
+
+    best_score = [0.0]
+    best_assignment = [{}]
+
+    def _upper_bound(current_score, depth, used):
+        """Optimistic upper bound: current + best N remaining unused scores."""
+        remaining_slots = len(slot_order) - depth
+        unused_scores = sorted(
+            (scores[formatters._player_id(batters[i])] for i in range(len(batters))
+             if i not in used),
+            reverse=True,
+        )
+        return current_score + sum(unused_scores[:remaining_slots])
+
+    def _solve(depth, used, assignment, current_score):
+        if depth == len(slot_order):
+            if current_score > best_score[0]:
+                best_score[0] = current_score
+                best_assignment[0] = dict(assignment)
+            return
+
+        # Prune: check upper bound
+        if _upper_bound(current_score, depth, used) <= best_score[0]:
+            return
+
+        slot_idx = slot_order[depth]
+        slot = slots[slot_idx]
+
+        # Try eligible players sorted by effective score (best first)
+        candidates = [(scores[formatters._player_id(batters[i])], i)
+                      for i in eligible[slot_idx] if i not in used]
+        candidates.sort(reverse=True)
+
+        for score_val, player_idx in candidates:
+            pid = formatters._player_id(batters[player_idx])
+            assignment[pid] = slot
+            used.add(player_idx)
+            _solve(depth + 1, used, assignment, current_score + score_val)
+            del assignment[pid]
+            used.discard(player_idx)
+
+    _solve(0, set(), {}, 0.0)
+    return best_assignment[0]
+
+
+def _diff_lineup(optimal, roster, teams_playing, opponents):
+    """Compare optimal assignment to current lineup, produce swap suggestions."""
+    import mlb_client
+
+    # Build current assignment: {player_id: current_slot} for batters in active slots
+    current = {}
+    player_by_id = {}
+    for p in roster:
+        pid = formatters._player_id(p)
+        player_by_id[pid] = p
+        slot = formatters._player_selected_position(p).upper()
+        if slot not in _NON_ACTIVE_SLOTS and slot not in _PITCHER_SLOTS:
+            current[pid] = slot
+
+    # Find players who moved from bench to active (new starters)
+    # and players who moved from active to bench (benched)
+    new_starters = {}  # pid -> new_slot
+    newly_benched = {}  # pid -> old_slot
+    for pid, new_slot in optimal.items():
+        old_slot = current.get(pid)
+        if old_slot is None:
+            # Was on bench (or not in current active), now starting
+            new_starters[pid] = new_slot
+
+    for pid, old_slot in current.items():
+        if pid not in optimal:
+            # Was active, now benched
+            newly_benched[pid] = old_slot
+
+    # Also detect slot changes (active player moved to different slot)
+    # These don't generate swap suggestions but are part of the optimal layout
+
+    swaps = []
+    # Match new starters with newly benched players by target slot
+    used_benched = set()
+    for starter_pid, target_slot in new_starters.items():
+        bench_p = player_by_id.get(starter_pid)
+        if not bench_p:
+            continue
+
+        # Find the player being replaced — prefer the one currently in target_slot
+        replaced_pid = None
+        for bp_id, old_slot in newly_benched.items():
+            if bp_id not in used_benched and old_slot == target_slot:
+                replaced_pid = bp_id
+                break
+        # If no direct slot match, pick any newly benched player
+        if replaced_pid is None:
+            for bp_id in newly_benched:
+                if bp_id not in used_benched:
+                    replaced_pid = bp_id
+                    break
+        if replaced_pid is None:
+            continue
+
+        used_benched.add(replaced_pid)
+        active_p = player_by_id.get(replaced_pid)
+        if not active_p:
+            continue
+
+        bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
+        active_team = mlb_client.normalize_team_abbr(formatters._player_team(active_p))
+        opp = opponents.get(bench_team, "?")
+        bench_score = bench_p.get("_opt_score", 0)
+        active_score = active_p.get("_opt_score", 0)
+
+        # Determine reason
+        if active_team and active_team not in teams_playing:
+            reason = f"{formatters._player_name(active_p)} ({active_team}) is off today"
+        else:
+            reason = (f"{formatters._player_name(bench_p)} ({bench_score}) > "
+                      f"{formatters._player_name(active_p)} ({active_score})")
+
+        swaps.append({
+            "bench_player": formatters._player_name(bench_p),
+            "bench_player_id": starter_pid,
+            "bench_slot": "BN",
+            "bench_team": bench_team,
+            "bench_opponent": opp,
+            "bench_score": bench_score,
+            "active_player": formatters._player_name(active_p),
+            "active_player_id": replaced_pid,
+            "active_slot": newly_benched[replaced_pid],
+            "active_team": active_team,
+            "active_score": active_score,
+            "target_slot": target_slot,
+            "reason": reason,
+        })
+
+    return swaps
+
+
 def cmd_optimize(args):
     """Smart roster analysis with swap suggestions, pitcher rotation, and IL management."""
     import mlb_client
@@ -1015,117 +1223,12 @@ def cmd_optimize(args):
                 score += PROBABLE_STARTER_BOOST
         p["_opt_score"] = round(score, 1)
 
-    # 1. Inactive player detection + bench swap suggestions
-    for active_p in active_players:
-        active_team = mlb_client.normalize_team_abbr(formatters._player_team(active_p))
-        active_slot = formatters._player_selected_position(active_p)
-
-        if active_team and active_team not in teams_playing:
-            # This active player's team is off — look for bench swaps
-            active_positions = formatters._player_position(active_p).upper().split(",")
-
-            for bench_p in bench_players:
-                bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
-
-                if bench_team and bench_team in teams_playing:
-                    # Bench player's team is playing — check position eligibility
-                    bench_positions = formatters._player_position(bench_p).upper().split(",")
-
-                    # Can the bench player fill the active player's slot?
-                    if active_slot.upper() in bench_positions or "UTIL" in bench_positions:
-                        opp = opponents.get(bench_team, "?")
-                        suggestions["swaps"].append({
-                            "bench_player": formatters._player_name(bench_p),
-                            "bench_player_id": formatters._player_id(bench_p),
-                            "bench_slot": "BN",
-                            "bench_team": bench_team,
-                            "bench_opponent": opp,
-                            "active_player": formatters._player_name(active_p),
-                            "active_player_id": formatters._player_id(active_p),
-                            "active_slot": active_slot,
-                            "active_team": active_team,
-                            "target_slot": active_slot,
-                            "reason": f"{formatters._player_name(active_p)} ({active_team}) is off today",
-                        })
-                        break  # One suggestion per inactive active player
-
-    # 1b. Score-based upgrade swaps (both teams playing)
-    SCORE_THRESHOLD = 0.20  # Bench player must score 20% higher
-    claimed_bench = {formatters._player_id(s) for s in suggestions["swaps"]
-                     if "bench_player_id" in s}
-    claimed_slots = {(s["active_player_id"], s["active_slot"]) for s in suggestions["swaps"]}
-
-    upgrade_candidates = []
-    for bench_p in bench_players:
-        bench_id = formatters._player_id(bench_p)
-        if bench_id in claimed_bench:
-            continue
-        bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
-        if not bench_team or bench_team not in teams_playing:
-            continue
-        bench_score = bench_p.get("_opt_score", 0)
-        bench_pos_type = bench_p.get("position_type", "B")
-        bench_positions = formatters._player_position(bench_p).upper().split(",")
-        # Skip non-probable SPs — they likely won't pitch today
-        if "SP" in bench_positions and bench_pos_type == "P":
-            bench_name = formatters._player_name(bench_p)
-            is_probable = (bench_team in probable_pitchers
-                           and _pitcher_names_match(bench_name,
-                                                    probable_pitchers[bench_team]))
-            if not is_probable:
-                continue
-
-        for active_p in active_players:
-            active_id = formatters._player_id(active_p)
-            active_slot = formatters._player_selected_position(active_p).upper()
-            if (active_id, active_slot) in claimed_slots:
-                continue
-            active_pos_type = active_p.get("position_type", "B")
-            # Only compare same position type (B vs B, P vs P)
-            if bench_pos_type != active_pos_type:
-                continue
-            # Check position eligibility
-            if active_slot not in bench_positions and active_slot != "UTIL":
-                continue
-            active_score = active_p.get("_opt_score", 0)
-            # Threshold check: bench must be meaningfully better
-            if active_score > 0 and bench_score <= active_score * (1 + SCORE_THRESHOLD):
-                continue
-            if active_score == 0 and bench_score <= 0:
-                continue
-            score_diff = bench_score - active_score
-            upgrade_candidates.append((score_diff, bench_p, active_p, active_slot))
-
-    # Sort by biggest score difference, then deduplicate (one suggestion per bench/slot)
-    upgrade_candidates.sort(key=lambda x: x[0], reverse=True)
-    used_bench_ids = set(claimed_bench)
-    used_active_slots = set(claimed_slots)
-    for diff, bench_p, active_p, active_slot in upgrade_candidates:
-        bench_id = formatters._player_id(bench_p)
-        active_id = formatters._player_id(active_p)
-        if bench_id in used_bench_ids or (active_id, active_slot) in used_active_slots:
-            continue
-        used_bench_ids.add(bench_id)
-        used_active_slots.add((active_id, active_slot))
-        bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
-        opp = opponents.get(bench_team, "?")
-        bench_score = bench_p.get("_opt_score", 0)
-        active_score = active_p.get("_opt_score", 0)
-        suggestions["swaps"].append({
-            "bench_player": formatters._player_name(bench_p),
-            "bench_player_id": bench_id,
-            "bench_slot": "BN",
-            "bench_team": bench_team,
-            "bench_opponent": opp,
-            "bench_score": bench_score,
-            "active_player": formatters._player_name(active_p),
-            "active_player_id": active_id,
-            "active_slot": active_slot,
-            "active_team": mlb_client.normalize_team_abbr(formatters._player_team(active_p)),
-            "active_score": active_score,
-            "target_slot": active_slot,
-            "reason": f"{formatters._player_name(bench_p)} ({bench_score}) > {formatters._player_name(active_p)} ({active_score})",
-        })
+    # 1. Optimal batter lineup solver
+    batter_slots = _count_active_batter_slots(roster)
+    all_batters = [p for p in active_players + bench_players
+                   if p.get("position_type", "B") == "B"]
+    optimal = _solve_optimal_lineup(all_batters, batter_slots, teams_playing)
+    suggestions["swaps"] = _diff_lineup(optimal, roster, teams_playing, opponents)
 
     # 2. Pitcher rotation alerts
     for player in roster:

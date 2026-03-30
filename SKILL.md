@@ -141,7 +141,7 @@ python3 /home/claw/.openclaw/workspace/skills/yahoo-fantasy-baseball/yahoo-fanta
 ```
 
 Three analysis categories:
-1. **Lineup swaps** — inactive starters with eligible bench replacements
+1. **Lineup swaps** — optimal batter assignment via constraint solver (position-aware, fills restrictive slots before UTIL)
 2. **Pitcher rotation** — probable starters on bench, active pitchers on off days
 3. **IL management** — injured players not in IL slots, cleared players still in IL
 
