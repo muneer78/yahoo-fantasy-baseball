@@ -958,6 +958,32 @@ def _count_active_batter_slots(roster):
     return slots
 
 
+def _preseason_rank_bonus(rank, total_players):
+    """Convert a preseason rank (1=best) into a score bonus.
+
+    Rank 1 gets the highest bonus, linearly tapering to 0 at total_players.
+    Designed so the best preseason player gets ~15 bonus points and the worst ~0.
+    """
+    if rank <= 0 or total_players <= 0:
+        return 0.0
+    MAX_BONUS = 15.0
+    return max(0.0, MAX_BONUS * (1.0 - (rank - 1) / max(total_players - 1, 1)))
+
+
+def _early_season_weight(current_week):
+    """Return a 0.0–1.0 weight for preseason rank blending.
+
+    Week 1-2: full weight (1.0)
+    Week 3-6: linear taper from 1.0 to 0.0
+    Week 7+: 0.0 (stats have enough sample size)
+    """
+    if current_week <= 2:
+        return 1.0
+    if current_week >= 7:
+        return 0.0
+    return 1.0 - (current_week - 2) / 5.0
+
+
 def _effective_score(player, teams_playing):
     """Return a batter's effective score for today (0 if team not playing)."""
     import mlb_client
@@ -1097,12 +1123,15 @@ def _diff_lineup(optimal, roster, teams_playing, opponents):
             if bp_id not in used_benched and old_slot == target_slot:
                 replaced_pid = bp_id
                 break
-        # If no direct slot match, pick any newly benched player
+        # If no direct slot match, pick any newly benched player whose old
+        # slot this bench player could fill (position eligibility check)
         if replaced_pid is None:
             for bp_id in newly_benched:
                 if bp_id not in used_benched:
-                    replaced_pid = bp_id
-                    break
+                    bp = player_by_id.get(bp_id)
+                    if bp and _can_fill_slot(bench_p, newly_benched[bp_id]):
+                        replaced_pid = bp_id
+                        break
         if replaced_pid is None:
             continue
 
@@ -1222,6 +1251,38 @@ def cmd_optimize(args):
                                     probable_pitchers[team_abbr]):
                 score += PROBABLE_STARTER_BOOST
         p["_opt_score"] = round(score, 1)
+
+    # Blend preseason rank bonus for early-season weeks
+    try:
+        current_week = league.current_week()
+    except Exception:
+        current_week = 1
+    weight = _early_season_weight(current_week)
+    if weight > 0:
+        try:
+            # Fetch all taken players sorted by preseason rank (OR)
+            all_ranked = yahoo_api.fetch_players_sorted(
+                league, status="T", sort="OR")
+            # Build rank map: player_id → rank (1-based)
+            rank_map = {}
+            for idx, rp in enumerate(all_ranked, 1):
+                pid = rp.get("player_id")
+                if pid:
+                    # Normalize to int for matching
+                    try:
+                        rank_map[int(pid)] = idx
+                    except (ValueError, TypeError):
+                        rank_map[pid] = idx
+            total = len(all_ranked)
+            for p in active_players + bench_players:
+                pid = p.get("player_id")
+                rank = rank_map.get(pid) or rank_map.get(str(pid))
+                if rank:
+                    bonus = _preseason_rank_bonus(rank, total) * weight
+                    p["_opt_score"] = round(p.get("_opt_score", 0) + bonus, 1)
+        except Exception as e:
+            print(f"Warning: Could not fetch preseason ranks: {e}",
+                  file=sys.stderr)
 
     # 1. Optimal batter lineup solver
     batter_slots = _count_active_batter_slots(roster)

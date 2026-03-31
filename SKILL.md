@@ -145,6 +145,13 @@ Three analysis categories:
 2. **Pitcher rotation** — probable starters on bench, active pitchers on off days
 3. **IL management** — injured players not in IL slots, cleared players still in IL
 
+**Early-season preseason rank blending:** The optimizer blends Yahoo's preseason overall rank (OR) into player scores during the first weeks of the season, when current-year stats are too small a sample to be reliable. The blending schedule:
+- **Weeks 1–2**: Full weight — preseason rank contributes up to 15 bonus points (rank 1 gets the max, last-ranked gets 0)
+- **Weeks 3–6**: Linear taper — preseason influence decreases by ~20% per week
+- **Week 7+**: Zero weight — scoring is based entirely on current-season stats
+
+This prevents the optimizer from overreacting to small early-season slumps (e.g., benching a star who went 0-for-8 in the first series). The preseason ranks are fetched via one additional Yahoo API call (`sort=OR, status=T`) per optimize run.
+
 ### Write Commands
 
 All write commands show a preview by default. Add `--confirm` to execute.
