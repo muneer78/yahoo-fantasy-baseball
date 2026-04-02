@@ -1299,6 +1299,13 @@ def _diff_lineup(optimal, roster, teams_playing, opponents, sitting_players=None
 
         bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
         active_team = mlb_client.normalize_team_abbr(formatters._player_team(active_p))
+
+        # Skip useless swaps where both players' teams are off
+        if (bench_team and bench_team not in teams_playing) and (active_team and active_team not in teams_playing):
+            continue
+        # Skip if bench player is also sitting (scratched)
+        if sitting_players and formatters._player_id(bench_p) in sitting_players:
+            continue
         opp = opponents.get(bench_team, "?")
         bench_score = bench_p.get("_opt_score", 0)
         active_score = active_p.get("_opt_score", 0)
