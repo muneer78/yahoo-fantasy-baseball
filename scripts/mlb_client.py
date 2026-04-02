@@ -320,3 +320,46 @@ def game_times_today(date_str=None):
 
     first_pitch = _format_time(earliest_dt) if earliest_dt else None
     return times, first_pitch
+
+
+def confirmed_lineups_today(date_str=None):
+    """Return confirmed batting lineups for today's games.
+
+    Args:
+        date_str: Date in YYYY-MM-DD format. Defaults to today.
+
+    Returns:
+        dict mapping team abbreviation -> list of player full names in the lineup.
+        Teams whose lineups are not yet posted will not appear in the dict.
+    """
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    parts = date_str.split("-")
+    api_date = f"{parts[1]}/{parts[2]}/{parts[0]}"
+
+    url = f"{SCHEDULE_URL}?sportId=1&date={api_date}&hydrate=lineups"
+    data = _fetch_json(url)
+    if data is None:
+        return {}
+
+    lineups = {}
+    for date_entry in data.get("dates", []):
+        for game in date_entry.get("games", []):
+            status = game.get("status", {}).get("detailedState", "")
+            if status in ("Cancelled", "Postponed"):
+                continue
+            game_lineups = game.get("lineups", {})
+            for side in ("away", "home"):
+                team_data = game.get("teams", {}).get(side, {})
+                team_id = team_data.get("team", {}).get("id")
+                if not team_id or team_id not in _TEAM_ID_TO_ABBR:
+                    continue
+                players = game_lineups.get(f"{side}Players", [])
+                if not players:
+                    continue
+                names = [p.get("fullName", "") for p in players if p.get("fullName")]
+                if names:
+                    lineups[_TEAM_ID_TO_ABBR[team_id]] = names
+
+    return lineups

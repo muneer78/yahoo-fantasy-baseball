@@ -993,6 +993,13 @@ def format_optimize(suggestions, fmt="text"):
             else:
                 lines.append(f"    {s['bench_player']} (BN, {s['bench_team']} playing)")
                 lines.append(f"      ↔  {s['active_player']} ({s['active_slot']}, {s['active_team']} off)")
+            if reason:
+                if "not in confirmed" in reason.lower():
+                    lines.append(f"      ⚠️  {reason}")
+                elif "off today" in reason.lower():
+                    lines.append(f"      📅  {reason}")
+                else:
+                    lines.append(f"      💡  {reason}")
     else:
         lines.append("    No swaps needed — lineup looks good.")
 
@@ -1022,6 +1029,47 @@ def format_optimize(suggestions, fmt="text"):
 
     if fmt == "discord":
         return "```\n" + "\n".join(lines) + "\n```"
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Lineup Check (confirmed MLB lineups vs fantasy roster)
+# ---------------------------------------------------------------------------
+
+def format_lineup_check(data, fmt="text"):
+    """Format lineup-check command output.
+
+    Args:
+        data: dict with keys 'date', 'team', 'sitting_players',
+              'lineup_not_posted', 'players_confirmed'.
+        fmt: Output format.
+    """
+    if fmt == "json":
+        return json.dumps(data, indent=2)
+
+    lines = [f"Lineup Check — {data['date']}"]
+    lines.append(f"Team: {data['team']}")
+    lines.append("=" * 50)
+
+    sitting = data.get("sitting_players", [])
+    if sitting:
+        lines.append(f"\nNOT in confirmed MLB lineup ({len(sitting)}):")
+        for p in sitting:
+            status_note = f" [Yahoo: {p['yahoo_status']}]" if p.get("yahoo_status") else ""
+            lines.append(
+                f"  {p['selected_position']}: {p['name']} ({p['team']}) "
+                f"— {p.get('opponent', '')} {p.get('game_time', '')}{status_note}"
+            )
+    else:
+        lines.append("\nAll active position players confirmed in lineup.")
+
+    confirmed = data.get("players_confirmed", 0)
+    lines.append(f"\nConfirmed in lineup: {confirmed}")
+
+    not_posted = data.get("lineup_not_posted", [])
+    if not_posted:
+        lines.append(f"Lineups not yet posted: {', '.join(not_posted)}")
+
     return "\n".join(lines)
 
 

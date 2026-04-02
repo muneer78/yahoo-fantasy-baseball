@@ -673,6 +673,72 @@ def cmd_day(args):
                                    first_pitch=first_pitch))
 
 
+def cmd_lineup_check(args):
+    """Check active roster players against confirmed MLB batting lineups."""
+    import mlb_client
+
+    config = yahoo_api.load_config()
+    league, team_key, team_name = _get_league_and_team(args, config)
+    tm = yahoo_api.get_team(league, team_key)
+
+    target_date_str = getattr(args, "date", None)
+    if target_date_str:
+        target_date = _parse_date(target_date_str)
+    else:
+        target_date = date.today()
+    target_date_str = target_date.strftime("%Y-%m-%d")
+
+    try:
+        roster = yahoo_api.get_roster(tm, day=target_date)
+    except Exception as e:
+        print(f"Error fetching roster: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not roster:
+        print("No players found on roster.")
+        return
+
+    teams_playing = mlb_client.teams_playing_today(target_date_str)
+    confirmed_lineups = mlb_client.confirmed_lineups_today(target_date_str)
+    matchups = mlb_client.game_matchups_today(target_date_str)
+    game_times, _ = mlb_client.game_times_today(target_date_str)
+
+    sitting_ids, sitting_details, lineup_not_posted = _find_sitting_players(
+        roster, confirmed_lineups, teams_playing
+    )
+
+    # Count confirmed active position players
+    IL_SLOTS = {"IL", "IL+", "DL", "DL+"}
+    BENCH_SLOTS = {"BN"}
+    confirmed_count = 0
+    for player in roster:
+        slot = formatters._player_selected_position(player).upper()
+        if slot in IL_SLOTS or slot in BENCH_SLOTS:
+            continue
+        if player.get("position_type", "B") == "P":
+            continue
+        pid = formatters._player_id(player)
+        team_abbr = mlb_client.normalize_team_abbr(formatters._player_team(player))
+        if team_abbr in confirmed_lineups and pid not in sitting_ids:
+            confirmed_count += 1
+
+    # Enrich sitting details with matchup/time info
+    for detail in sitting_details:
+        team_abbr = detail["team"]
+        detail["opponent"] = matchups.get(team_abbr, "")
+        detail["game_time"] = game_times.get(team_abbr, "")
+
+    result = {
+        "date": target_date_str,
+        "team": team_name,
+        "sitting_players": sitting_details,
+        "lineup_not_posted": lineup_not_posted,
+        "players_confirmed": confirmed_count,
+    }
+
+    print(formatters.format_lineup_check(result, fmt=args.format))
+
+
 # ---------------------------------------------------------------------------
 # Standouts — yesterday's top performers across all teams
 # ---------------------------------------------------------------------------
@@ -935,6 +1001,97 @@ def _pitcher_names_match(roster_name, mlb_name):
     return False
 
 
+def _player_names_match(yahoo_name, mlb_name):
+    """Check if a Yahoo roster player name matches an MLB lineup player name.
+
+    Handles middle initials, suffixes (Jr., II), and accented characters.
+    """
+    import unicodedata
+
+    def _normalize(name):
+        # Strip accents
+        nfkd = unicodedata.normalize("NFKD", name)
+        stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
+        # Lowercase, remove periods and commas
+        stripped = stripped.lower().replace(".", "").replace(",", "")
+        # Remove common suffixes
+        for suffix in (" jr", " sr", " ii", " iii", " iv"):
+            if stripped.endswith(suffix):
+                stripped = stripped[: -len(suffix)]
+        return stripped.strip()
+
+    yn = _normalize(yahoo_name)
+    mn = _normalize(mlb_name)
+
+    # Exact match after normalization
+    if yn == mn:
+        return True
+
+    # First + last name match (skip middle initials/names)
+    y_parts = yn.split()
+    m_parts = mn.split()
+    if len(y_parts) >= 2 and len(m_parts) >= 2:
+        if y_parts[0] == m_parts[0] and y_parts[-1] == m_parts[-1]:
+            return True
+
+    return False
+
+
+def _find_sitting_players(roster, confirmed_lineups, teams_playing):
+    """Cross-reference roster against confirmed MLB lineups.
+
+    Returns:
+        tuple: (sitting_player_ids: set, sitting_details: list[dict], lineup_not_posted: list[str])
+        - sitting_player_ids: set of player_id values for players confirmed not in lineup
+        - sitting_details: list of dicts with player info for reporting
+        - lineup_not_posted: list of team abbreviations where lineup is not yet available
+    """
+    import mlb_client
+
+    sitting_ids = set()
+    sitting_details = []
+    not_posted_teams = set()
+
+    IL_SLOTS = {"IL", "IL+", "DL", "DL+"}
+    BENCH_SLOTS = {"BN"}
+
+    for player in roster:
+        slot = formatters._player_selected_position(player).upper()
+        # Only check active position players (not bench, IL, or pitchers)
+        if slot in IL_SLOTS or slot in BENCH_SLOTS:
+            continue
+        pos_type = player.get("position_type", "B")
+        if pos_type == "P":
+            continue
+
+        team_abbr = mlb_client.normalize_team_abbr(formatters._player_team(player))
+        if not team_abbr or team_abbr not in teams_playing:
+            continue
+
+        if team_abbr not in confirmed_lineups:
+            not_posted_teams.add(team_abbr)
+            continue
+
+        # Check if player is in the confirmed lineup
+        lineup_names = confirmed_lineups[team_abbr]
+        player_name = formatters._player_name(player)
+        found = any(_player_names_match(player_name, ln) for ln in lineup_names)
+
+        if not found:
+            pid = formatters._player_id(player)
+            sitting_ids.add(pid)
+            sitting_details.append({
+                "name": player_name,
+                "player_id": pid,
+                "team": team_abbr,
+                "selected_position": slot,
+                "positions": formatters._player_position(player),
+                "yahoo_status": formatters._player_status(player),
+            })
+
+    return sitting_ids, sitting_details, sorted(not_posted_teams)
+
+
 # ---------------------------------------------------------------------------
 # Optimal batter lineup solver
 # ---------------------------------------------------------------------------
@@ -984,11 +1141,13 @@ def _early_season_weight(current_week):
     return 1.0 - (current_week - 2) / 5.0
 
 
-def _effective_score(player, teams_playing):
-    """Return a batter's effective score for today (0 if team not playing)."""
+def _effective_score(player, teams_playing, sitting_players=None):
+    """Return a batter's effective score for today (0 if team not playing or player sitting)."""
     import mlb_client
     team = mlb_client.normalize_team_abbr(formatters._player_team(player))
     if team and team not in teams_playing:
+        return 0.0
+    if sitting_players and formatters._player_id(player) in sitting_players:
         return 0.0
     return player.get("_opt_score", 0.0)
 
@@ -1001,7 +1160,7 @@ def _can_fill_slot(player, slot):
     return slot in positions
 
 
-def _solve_optimal_lineup(batters, slots, teams_playing):
+def _solve_optimal_lineup(batters, slots, teams_playing, sitting_players=None):
     """Backtracking solver: assign batters to slots maximizing total effective score.
 
     Returns {player_id: slot} for all batters assigned to active slots.
@@ -1013,7 +1172,7 @@ def _solve_optimal_lineup(batters, slots, teams_playing):
     scores = {}
     for p in batters:
         pid = formatters._player_id(p)
-        scores[pid] = _effective_score(p, teams_playing)
+        scores[pid] = _effective_score(p, teams_playing, sitting_players)
 
     # Pre-compute eligibility: for each slot index, which player indices can fill it
     eligible = []
@@ -1077,7 +1236,7 @@ def _solve_optimal_lineup(batters, slots, teams_playing):
     return best_assignment[0]
 
 
-def _diff_lineup(optimal, roster, teams_playing, opponents):
+def _diff_lineup(optimal, roster, teams_playing, opponents, sitting_players=None):
     """Compare optimal assignment to current lineup, produce swap suggestions."""
     import mlb_client
 
@@ -1123,15 +1282,13 @@ def _diff_lineup(optimal, roster, teams_playing, opponents):
             if bp_id not in used_benched and old_slot == target_slot:
                 replaced_pid = bp_id
                 break
-        # If no direct slot match, pick any newly benched player whose old
-        # slot this bench player could fill (position eligibility check)
+        # If no direct slot match, pick any newly benched player (the solver
+        # may rearrange slots to accommodate, so direct position match isn't required)
         if replaced_pid is None:
             for bp_id in newly_benched:
                 if bp_id not in used_benched:
-                    bp = player_by_id.get(bp_id)
-                    if bp and _can_fill_slot(bench_p, newly_benched[bp_id]):
-                        replaced_pid = bp_id
-                        break
+                    replaced_pid = bp_id
+                    break
         if replaced_pid is None:
             continue
 
@@ -1147,7 +1304,9 @@ def _diff_lineup(optimal, roster, teams_playing, opponents):
         active_score = active_p.get("_opt_score", 0)
 
         # Determine reason
-        if active_team and active_team not in teams_playing:
+        if sitting_players and replaced_pid in sitting_players:
+            reason = f"{formatters._player_name(active_p)} ({active_team}) not in confirmed MLB lineup"
+        elif active_team and active_team not in teams_playing:
             reason = f"{formatters._player_name(active_p)} ({active_team}) is off today"
         else:
             reason = (f"{formatters._player_name(bench_p)} ({bench_score}) > "
@@ -1195,6 +1354,10 @@ def cmd_optimize(args):
     teams_playing = mlb_client.teams_playing_today(today_str)
     probable_pitchers = mlb_client.probable_pitchers_today(today_str)
     opponents = mlb_client.game_opponents_today(today_str)
+    confirmed_lineups = mlb_client.confirmed_lineups_today(today_str)
+
+    # Find position players confirmed not in MLB lineup
+    sitting_ids, _, _ = _find_sitting_players(roster, confirmed_lineups, teams_playing)
 
     IL_STATUSES = {"IL", "IL10", "IL15", "IL60", "DL", "DTD", "IL-10", "IL-15", "IL-60"}
     IL_SLOTS = {"IL", "IL+", "DL", "DL+"}
@@ -1288,8 +1451,8 @@ def cmd_optimize(args):
     batter_slots = _count_active_batter_slots(roster)
     all_batters = [p for p in active_players + bench_players
                    if p.get("position_type", "B") == "B"]
-    optimal = _solve_optimal_lineup(all_batters, batter_slots, teams_playing)
-    suggestions["swaps"] = _diff_lineup(optimal, roster, teams_playing, opponents)
+    optimal = _solve_optimal_lineup(all_batters, batter_slots, teams_playing, sitting_ids)
+    suggestions["swaps"] = _diff_lineup(optimal, roster, teams_playing, opponents, sitting_ids)
 
     # 2. Pitcher rotation alerts
     for player in roster:
@@ -1376,6 +1539,8 @@ def cmd_swap(args):
         teams_playing = mlb_client.teams_playing_today(today_str)
         probable_pitchers = mlb_client.probable_pitchers_today(today_str)
         opponents = mlb_client.game_opponents_today(today_str)
+        confirmed_lineups = mlb_client.confirmed_lineups_today(today_str)
+        sitting_ids, _, _ = _find_sitting_players(roster, confirmed_lineups, teams_playing)
 
         IL_SLOTS = {"IL", "IL+", "DL", "DL+"}
         BENCH_SLOTS = {"BN"}
@@ -1397,11 +1562,12 @@ def cmd_swap(args):
         for active_p in active_players:
             active_team = mlb_client.normalize_team_abbr(formatters._player_team(active_p))
             active_slot = formatters._player_selected_position(active_p)
+            active_pid = formatters._player_id(active_p)
 
-            if active_team and active_team not in teams_playing:
+            if (active_team and active_team not in teams_playing) or active_pid in sitting_ids:
                 for bench_p in bench_players:
                     bp_id = formatters._player_id(bench_p)
-                    if bp_id in used_bench:
+                    if bp_id in used_bench or bp_id in sitting_ids:
                         continue
                     bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
                     if bench_team and bench_team in teams_playing:
@@ -1751,6 +1917,12 @@ def main():
     _add_common_args(day_parser)
     day_parser.add_argument("--date", help="Date (e.g. 3/22/2026 or 2026-03-22, default: today)")
 
+    # lineup-check — check active players against confirmed MLB lineups
+    lineup_check_parser = subparsers.add_parser("lineup-check",
+        help="Check active players against confirmed MLB lineups")
+    _add_common_args(lineup_check_parser)
+    lineup_check_parser.add_argument("--date", help="Date (YYYY-MM-DD, default today)")
+
     # standouts — yesterday's top performers
     standouts_parser = subparsers.add_parser("standouts",
         help="Yesterday's standout performers across all teams")
@@ -1825,6 +1997,7 @@ def main():
         "injuries": cmd_injuries,
         "today": cmd_today,
         "day": cmd_day,
+        "lineup-check": cmd_lineup_check,
         "standouts": cmd_standouts,
         "optimize": cmd_optimize,
         "swap": cmd_swap,
