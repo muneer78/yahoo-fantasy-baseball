@@ -1252,6 +1252,11 @@ def _diff_lineup_moves(optimal, roster, teams_playing, opponents, sitting_player
         slot = formatters._player_selected_position(p).upper()
         if slot in _PITCHER_SLOTS:
             continue  # pitchers handled separately
+        # Skip locked players — their game started, Yahoo won't allow moves
+        if locked_teams:
+            team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+            if team in locked_teams:
+                continue
         if slot in _NON_ACTIVE_SLOTS:
             if slot == "BN":
                 current[pid] = "BN"
