@@ -1236,106 +1236,77 @@ def _solve_optimal_lineup(batters, slots, teams_playing, sitting_players=None):
     return best_assignment[0]
 
 
-def _diff_lineup(optimal, roster, teams_playing, opponents, sitting_players=None):
-    """Compare optimal assignment to current lineup, produce swap suggestions."""
+def _diff_lineup_moves(optimal, roster, teams_playing, opponents, sitting_players=None, locked_teams=None):
+    """Compare optimal assignment to current lineup, produce a list of position moves.
+
+    Instead of pairing bench/active players (which breaks for multi-step
+    rearrangements), this returns every individual position change needed.
+    """
     import mlb_client
 
-    # Build current assignment: {player_id: current_slot} for batters in active slots
-    current = {}
     player_by_id = {}
+    current = {}  # pid -> current_slot (active slots + BN)
     for p in roster:
         pid = formatters._player_id(p)
         player_by_id[pid] = p
         slot = formatters._player_selected_position(p).upper()
-        if slot not in _NON_ACTIVE_SLOTS and slot not in _PITCHER_SLOTS:
+        if slot in _PITCHER_SLOTS:
+            continue  # pitchers handled separately
+        if slot in _NON_ACTIVE_SLOTS:
+            if slot == "BN":
+                current[pid] = "BN"
+        elif slot and slot not in ("", "NA"):
             current[pid] = slot
 
-    # Find players who moved from bench to active (new starters)
-    # and players who moved from active to bench (benched)
-    new_starters = {}  # pid -> new_slot
-    newly_benched = {}  # pid -> old_slot
-    for pid, new_slot in optimal.items():
-        old_slot = current.get(pid)
-        if old_slot is None:
-            # Was on bench (or not in current active), now starting
-            new_starters[pid] = new_slot
+    # Batters not in optimal assignment go to BN
+    optimal_full = dict(optimal)
+    for pid in current:
+        if pid not in optimal_full and current[pid] != "BN":
+            # Active batter not in optimal → benched
+            optimal_full[pid] = "BN"
 
-    for pid, old_slot in current.items():
-        if pid not in optimal:
-            # Was active, now benched
-            newly_benched[pid] = old_slot
-
-    # Also detect slot changes (active player moved to different slot)
-    # These don't generate swap suggestions but are part of the optimal layout
-
-    swaps = []
-    # Match new starters with newly benched players by target slot
-    used_benched = set()
-    for starter_pid, target_slot in new_starters.items():
-        bench_p = player_by_id.get(starter_pid)
-        if not bench_p:
+    moves = []
+    for pid, cur_slot in current.items():
+        new_slot = optimal_full.get(pid, "BN")
+        if cur_slot == new_slot:
             continue
-
-        # Find the player being replaced — prefer the one currently in target_slot
-        replaced_pid = None
-        for bp_id, old_slot in newly_benched.items():
-            if bp_id not in used_benched and old_slot == target_slot:
-                replaced_pid = bp_id
-                break
-        # If no direct slot match, pick any newly benched player (the solver
-        # may rearrange slots to accommodate, so direct position match isn't required)
-        if replaced_pid is None:
-            for bp_id in newly_benched:
-                if bp_id not in used_benched:
-                    replaced_pid = bp_id
-                    break
-        if replaced_pid is None:
+        p = player_by_id.get(pid)
+        if not p:
             continue
+        team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+        opp = opponents.get(team, "")
 
-        used_benched.add(replaced_pid)
-        active_p = player_by_id.get(replaced_pid)
-        if not active_p:
-            continue
+        # Determine reason for moves to BN
+        reason = ""
+        if new_slot == "BN":
+            if sitting_players and pid in sitting_players:
+                reason = "not in confirmed MLB lineup"
+            elif locked_teams and team in locked_teams:
+                reason = "game already started"
+            elif team and team not in teams_playing:
+                reason = "team off today"
 
-        bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
-        active_team = mlb_client.normalize_team_abbr(formatters._player_team(active_p))
-
-        # Skip useless swaps where both players' teams are off
-        if (bench_team and bench_team not in teams_playing) and (active_team and active_team not in teams_playing):
-            continue
-        # Skip if bench player is also sitting (scratched)
-        if sitting_players and formatters._player_id(bench_p) in sitting_players:
-            continue
-        opp = opponents.get(bench_team, "?")
-        bench_score = bench_p.get("_opt_score", 0)
-        active_score = active_p.get("_opt_score", 0)
-
-        # Determine reason
-        if sitting_players and replaced_pid in sitting_players:
-            reason = f"{formatters._player_name(active_p)} ({active_team}) not in confirmed MLB lineup"
-        elif active_team and active_team not in teams_playing:
-            reason = f"{formatters._player_name(active_p)} ({active_team}) is off today"
-        else:
-            reason = (f"{formatters._player_name(bench_p)} ({bench_score}) > "
-                      f"{formatters._player_name(active_p)} ({active_score})")
-
-        swaps.append({
-            "bench_player": formatters._player_name(bench_p),
-            "bench_player_id": starter_pid,
-            "bench_slot": "BN",
-            "bench_team": bench_team,
-            "bench_opponent": opp,
-            "bench_score": bench_score,
-            "active_player": formatters._player_name(active_p),
-            "active_player_id": replaced_pid,
-            "active_slot": newly_benched[replaced_pid],
-            "active_team": active_team,
-            "active_score": active_score,
-            "target_slot": target_slot,
+        moves.append({
+            "player": formatters._player_name(p),
+            "player_id": pid,
+            "team": team,
+            "opponent": opp,
+            "from_slot": cur_slot,
+            "to_slot": new_slot,
+            "score": p.get("_opt_score", 0),
             "reason": reason,
         })
 
-    return swaps
+    # Sort: BN→active first, active→active next, active→BN last
+    def _sort_key(m):
+        if m["from_slot"] == "BN":
+            return (0, m["player"])
+        if m["to_slot"] == "BN":
+            return (2, m["player"])
+        return (1, m["player"])
+
+    moves.sort(key=_sort_key)
+    return moves
 
 
 def cmd_optimize(args):
@@ -1358,7 +1329,8 @@ def cmd_optimize(args):
         print("No players found on roster.")
         return
 
-    teams_playing = mlb_client.teams_playing_today(today_str)
+    unlocked_teams, locked_teams = mlb_client.teams_with_unlocked_games(today_str)
+    teams_playing = unlocked_teams | locked_teams  # full set for display/pitchers
     probable_pitchers = mlb_client.probable_pitchers_today(today_str)
     opponents = mlb_client.game_opponents_today(today_str)
     confirmed_lineups = mlb_client.confirmed_lineups_today(today_str)
@@ -1366,11 +1338,11 @@ def cmd_optimize(args):
     # Find position players confirmed not in MLB lineup
     sitting_ids, _, _ = _find_sitting_players(roster, confirmed_lineups, teams_playing)
 
-    IL_STATUSES = {"IL", "IL10", "IL15", "IL60", "DL", "DTD", "IL-10", "IL-15", "IL-60"}
+    IL_STATUSES = {"IL", "IL10", "IL15", "IL60", "DL", "IL-10", "IL-15", "IL-60"}
     IL_SLOTS = {"IL", "IL+", "DL", "DL+"}
     BENCH_SLOTS = {"BN"}
 
-    suggestions = {"swaps": [], "pitcher_alerts": [], "il_moves": []}
+    suggestions = {"moves": [], "pitcher_alerts": [], "il_moves": []}
 
     # Categorize players
     active_players = []  # In active slots
@@ -1455,11 +1427,31 @@ def cmd_optimize(args):
                   file=sys.stderr)
 
     # 1. Optimal batter lineup solver
+    # Exclude locked players (game already started) from the solver — Yahoo
+    # locks roster slots at first pitch, so these can't be moved.
     batter_slots = _count_active_batter_slots(roster)
-    all_batters = [p for p in active_players + bench_players
-                   if p.get("position_type", "B") == "B"]
-    optimal = _solve_optimal_lineup(all_batters, batter_slots, teams_playing, sitting_ids)
-    suggestions["swaps"] = _diff_lineup(optimal, roster, teams_playing, opponents, sitting_ids)
+    locked_batter_slots = []
+    moveable_batters = []
+    for p in active_players + bench_players:
+        if p.get("position_type", "B") != "B":
+            continue
+        team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+        if team in locked_teams:
+            # Locked active player: reserve their slot
+            slot = formatters._player_selected_position(p).upper()
+            if slot not in _NON_ACTIVE_SLOTS and slot not in _PITCHER_SLOTS:
+                locked_batter_slots.append(slot)
+            # Locked bench player: stays on bench, not added to solver
+            continue
+        moveable_batters.append(p)
+
+    available_slots = list(batter_slots)
+    for s in locked_batter_slots:
+        if s in available_slots:
+            available_slots.remove(s)
+
+    optimal = _solve_optimal_lineup(moveable_batters, available_slots, unlocked_teams, sitting_ids)
+    suggestions["moves"] = _diff_lineup_moves(optimal, roster, unlocked_teams, opponents, sitting_ids, locked_teams=locked_teams)
 
     # 2. Pitcher rotation alerts
     for player in roster:
@@ -1477,8 +1469,8 @@ def cmd_optimize(args):
             if _pitcher_names_match(name, probable_pitchers[team_abbr]):
                 is_probable = True
 
-        if is_probable and slot == "BN":
-            # Probable starter is on bench
+        if is_probable and slot == "BN" and team_abbr in unlocked_teams:
+            # Probable starter is on bench and game hasn't started yet
             suggestions["pitcher_alerts"].append({
                 "type": "probable_starter_benched",
                 "player": name,
@@ -1543,7 +1535,8 @@ def cmd_swap(args):
         import mlb_client
 
         today_str = today.strftime("%Y-%m-%d")
-        teams_playing = mlb_client.teams_playing_today(today_str)
+        unlocked_teams, locked_teams = mlb_client.teams_with_unlocked_games(today_str)
+        teams_playing = unlocked_teams | locked_teams
         probable_pitchers = mlb_client.probable_pitchers_today(today_str)
         opponents = mlb_client.game_opponents_today(today_str)
         confirmed_lineups = mlb_client.confirmed_lineups_today(today_str)
@@ -1571,13 +1564,18 @@ def cmd_swap(args):
             active_slot = formatters._player_selected_position(active_p)
             active_pid = formatters._player_id(active_p)
 
+            # Skip locked players — game already started, can't move them
+            if active_team in locked_teams:
+                continue
+
             if (active_team and active_team not in teams_playing) or active_pid in sitting_ids:
                 for bench_p in bench_players:
                     bp_id = formatters._player_id(bench_p)
                     if bp_id in used_bench or bp_id in sitting_ids:
                         continue
                     bench_team = mlb_client.normalize_team_abbr(formatters._player_team(bench_p))
-                    if bench_team and bench_team in teams_playing:
+                    # Only swap in bench players whose games haven't started
+                    if bench_team and bench_team in unlocked_teams:
                         bench_positions = formatters._player_position(bench_p).upper().split(",")
                         if active_slot.upper() in bench_positions or "UTIL" in bench_positions:
                             changes.append({

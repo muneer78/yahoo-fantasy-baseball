@@ -970,7 +970,7 @@ def format_optimize(suggestions, fmt="text"):
     """Format optimize command output.
 
     Args:
-        suggestions: dict with keys 'swaps', 'pitcher_alerts', 'il_moves',
+        suggestions: dict with keys 'moves', 'pitcher_alerts', 'il_moves',
                      each a list of suggestion dicts.
         fmt: Output format.
     """
@@ -980,28 +980,27 @@ def format_optimize(suggestions, fmt="text"):
     lines = ["Roster Optimization Suggestions"]
     lines.append("=" * 50)
 
-    # Lineup swaps
-    swaps = suggestions.get("swaps", [])
+    # Lineup changes (position moves)
+    moves = suggestions.get("moves", [])
     lines.append("")
-    lines.append(f"  LINEUP SWAPS ({len(swaps)} suggested)")
-    if swaps:
-        for s in swaps:
-            reason = s.get("reason", "")
-            if "bench_score" in s:
-                lines.append(f"    {s['bench_player']} (BN, {s['bench_team']}, score: {s['bench_score']})")
-                lines.append(f"      ↔  {s['active_player']} ({s['active_slot']}, {s['active_team']}, score: {s['active_score']})")
-            else:
-                lines.append(f"    {s['bench_player']} (BN, {s['bench_team']} playing)")
-                lines.append(f"      ↔  {s['active_player']} ({s['active_slot']}, {s['active_team']} off)")
+    lines.append(f"  LINEUP CHANGES ({len(moves)} moves)")
+    if moves:
+        for m in moves:
+            opp_str = f" vs {m['opponent']}" if m.get("opponent") else ""
+            lines.append(f"    {m['player']}: {m['from_slot']} → {m['to_slot']}")
+            lines.append(f"      ({m['team']}{opp_str}, score: {m['score']})")
+            reason = m.get("reason", "")
             if reason:
                 if "not in confirmed" in reason.lower():
                     lines.append(f"      ⚠️  {reason}")
+                elif "already started" in reason.lower():
+                    lines.append(f"      🔒  {reason}")
                 elif "off today" in reason.lower():
                     lines.append(f"      📅  {reason}")
                 else:
                     lines.append(f"      💡  {reason}")
     else:
-        lines.append("    No swaps needed — lineup looks good.")
+        lines.append("    No lineup changes needed — lineup looks good.")
 
     # Pitcher rotation
     pitcher_alerts = suggestions.get("pitcher_alerts", [])
@@ -1024,7 +1023,7 @@ def format_optimize(suggestions, fmt="text"):
         lines.append("    No IL moves needed.")
 
     lines.append("")
-    total = len(swaps) + len(pitcher_alerts) + len(il_moves)
+    total = len(moves) + len(pitcher_alerts) + len(il_moves)
     lines.append(f"Total: {total} suggestion(s)")
 
     if fmt == "discord":
