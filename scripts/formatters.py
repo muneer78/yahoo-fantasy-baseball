@@ -1195,24 +1195,3 @@ def format_standouts(top_performers, left_on_bench, date_str, categories=None,
     if fmt == "discord":
         return "```\n" + "\n".join(lines) + "\n```"
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Write operation previews
-# ---------------------------------------------------------------------------
-
-def format_preview(action, details, fmt="text"):
-    """Format a preview of a write operation (before --confirm)."""
-    if fmt == "json":
-        return json.dumps({"action": action, "preview": True, **details}, indent=2)
-
-    lines = [f"Preview: {action}"]
-    lines.append("-" * 50)
-    for key, val in details.items():
-        lines.append(f"  {key}: {val}")
-    lines.append("")
-    lines.append("Add --confirm to execute this change.")
-
-    if fmt == "discord":
-        return "```\n" + "\n".join(lines) + "\n```"
-    return "\n".join(lines)

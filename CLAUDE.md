@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is an **OpenClaw skill** for Yahoo Fantasy Baseball. It accesses league data and performs roster management via the Yahoo Fantasy Sports API using the [yahoo-fantasy-api](https://github.com/spilchen/yahoo_fantasy_api) Python library. The skill supports both **read operations** (viewing data) and **write operations** (roster moves, add/drops, waiver claims).
+This is an **OpenClaw skill** for Yahoo Fantasy Baseball. It accesses league data via the Yahoo Fantasy Sports API using the [yahoo-fantasy-api](https://github.com/spilchen/yahoo_fantasy_api) Python library. The skill is **read-only** — it queries data and suggests optimizations but does not modify rosters.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ This is an **OpenClaw skill** for Yahoo Fantasy Baseball. It accesses league dat
 yahoo-fantasy-baseball/
   SKILL.md                    — Skill manifest (frontmatter + docs)
   CLAUDE.md                   — This file
-  yahoo-fantasy-baseball.py   — Venv bootstrap entry point
+  yahoo-fantasy-baseball.py   — Entry point (--setup for deps, fail-fast if missing)
   requirements.txt            — yahoo_fantasy_api dependency
   .gitignore                  — .deps/, __pycache__, .env
   scripts/
@@ -24,12 +24,12 @@ yahoo-fantasy-baseball/
 
 ### Entry Point
 
-`yahoo-fantasy-baseball.py` is a bootstrap script. It auto-creates a `.deps/` venv, installs `yahoo_fantasy_api` from `requirements.txt`, re-execs into the venv, then calls `scripts/fantasy.py:main()`.
+`yahoo-fantasy-baseball.py` is the entry point. Run `--setup` to create the `.deps/` venv and install pinned dependencies from `requirements.txt`. On normal runs, it fails fast if deps are missing, then re-execs into the venv and calls `scripts/fantasy.py:main()`.
 
 ### Module Responsibilities
 
 **`scripts/yahoo_api.py`** — API layer:
-- `run_auth()` — Interactive OAuth setup, stores consumer key/secret to `~/.openclaw/credentials/yahoo-fantasy/oauth2.json`
+- `run_auth()` — Interactive OAuth setup, stores consumer key/secret to `~/.openclaw/credentials/yahoo-fantasy/oauth2.json` (0600 perms on Unix)
 - `_migrate_legacy_env()` — Auto-migrates YFPY `.env` credentials to `oauth2.json` format
 - `get_game(season)` — Returns authenticated `(yfa.Game, OAuth2)` tuple
 - `get_league(league_id, season)` — Returns `yfa.League` instance
@@ -41,17 +41,14 @@ yahoo-fantasy-baseball/
 - `resolve_team_key()` — Resolves team key from args, config, or auto-detection via `league.team_key()`
 
 **`scripts/fantasy.py`** — CLI layer:
-- Argparse with subcommands organized into read and write operations
-- Read: `auth`, `config`, `leagues`, `teams`, `roster`, `lineup`, `standings`, `matchup`, `scoreboard`, `players`, `draft`, `transactions`, `injuries`, `today`, `day`, `standouts`, `optimize`
-- Write: `swap`, `move-to-il`, `add`, `drop`, `add-drop`, `claim`
-- Write commands require `--confirm` flag to execute; without it they show a preview
+- Argparse with subcommands: `auth`, `config`, `leagues`, `teams`, `roster`, `lineup`, `standings`, `matchup`, `scoreboard`, `players`, `draft`, `transactions`, `injuries`, `today`, `day`, `lineup-check`, `standouts`, `optimize`
+- All commands are read-only
 - Each `cmd_*` function: resolves args → calls yahoo_api → calls formatters → prints
 
 **`scripts/formatters.py`** — Output layer:
 - One `format_*` function per data type
 - Each supports text (tabular), JSON (`json.dumps`), and discord (wrapped in code blocks)
 - Helper functions handle dict-based data from yahoo-fantasy-api via `_safe()` accessor
-- Write operation previews via `format_preview()`
 
 **`scripts/mlb_client.py`** — MLB schedule layer (stdlib only):
 - `teams_playing_today(date_str)` — Set of team abbreviations with games today
@@ -62,7 +59,10 @@ yahoo-fantasy-baseball/
 ## Running
 
 ```bash
-# Direct (bootstraps venv on first run)
+# First time: install dependencies
+python yahoo-fantasy-baseball.py --setup
+
+# Normal usage
 python yahoo-fantasy-baseball.py roster
 
 # Or from scripts/ directly (requires venv active)
@@ -88,12 +88,6 @@ cd scripts && python fantasy.py roster
 | `day` | roster + `mlb_client.teams_playing_today(date)` + `mlb_client.probable_pitchers_today(date)` |
 | `standouts` | `league.teams()` + `team.roster(day=date)` x N + `league.player_stats(ids, "date", date=yesterday)` |
 | `optimize` | roster + MLB schedule + position analysis |
-| `swap` | `team.change_positions(date, lineup)` |
-| `move-to-il` | `team.change_positions(date, [{player_id, "IL"}])` |
-| `add` | `team.add_player(player_id)` |
-| `drop` | `team.drop_player(player_id)` |
-| `add-drop` | `team.add_and_drop_players(add_id, drop_id)` |
-| `claim` | `team.claim_player(id, faab)` / `team.claim_and_drop_players(add_id, drop_id, faab)` |
 
 ## Data Format
 
@@ -107,9 +101,11 @@ yahoo-fantasy-api returns plain Python dicts (not custom objects). Key shapes:
 
 ## Credential Storage
 
+**Preferred:** Set `YAHOO_CONSUMER_KEY` and `YAHOO_CONSUMER_SECRET` env vars (via OpenClaw config or shell). The skill writes them to `oauth2.json` for yahoo_oauth token management, but the static secrets don't need to be entered interactively.
+
 ```
 ~/.openclaw/credentials/yahoo-fantasy/
-  oauth2.json             — OAuth consumer key/secret + tokens (managed by yahoo_oauth)
+  oauth2.json             — OAuth consumer key/secret + tokens (managed by yahoo_oauth, 0600 perms on Unix)
   yahoo-fantasy.json      — Default league_id, team_id, season
 ```
 
@@ -117,7 +113,7 @@ Legacy `.env` credentials from YFPY are auto-migrated to `oauth2.json` on first 
 
 ## Dependencies
 
-- **yahoo_fantasy_api** (installed via bootstrap venv) — Yahoo Fantasy Sports API wrapper
+- **yahoo_fantasy_api==2.12.2** (installed via `--setup`) — Yahoo Fantasy Sports API wrapper
 - **yahoo_oauth** (dependency of yahoo_fantasy_api) — OAuth2 authentication
 - Python 3.10+
 
@@ -127,5 +123,5 @@ Legacy `.env` credentials from YFPY are auto-migrated to `oauth2.json` on first 
 - The game code for MLB is `"mlb"`. Game keys vary by season.
 - Team auto-detection uses `league.team_key()` which returns the current user's team key.
 - All output goes to stdout. Errors go to stderr.
-- Write operations require `--confirm` flag — without it, they show a preview and exit.
+- All commands are read-only — no roster modifications.
 - MLB schedule data comes from the MLB Stats API (stdlib only, no dependencies).
