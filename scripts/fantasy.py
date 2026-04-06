@@ -1302,7 +1302,10 @@ def _diff_lineup_moves(optimal, roster, teams_playing, opponents, sitting_player
             "reason": reason,
         })
 
-    # Sort: BN→active first, active→active next, active→BN last
+    # Filter out active→active reshuffles — only BN↔active moves matter
+    moves = [m for m in moves if m["from_slot"] == "BN" or m["to_slot"] == "BN"]
+
+    # Sort: BN→active first, active→BN last
     def _sort_key(m):
         if m["from_slot"] == "BN":
             return (0, m["player"])
