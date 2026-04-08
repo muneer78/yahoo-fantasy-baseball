@@ -18,12 +18,17 @@ GAME_CODE = "mlb"
 
 
 def _ensure_cred_dir():
-    """Create credential directory if it doesn't exist."""
+    """Create credential directory if it doesn't exist (0700 on Unix)."""
     CRED_DIR.mkdir(parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        os.chmod(CRED_DIR, 0o700)
 
 
 def _set_file_permissions(path):
-    """Set restrictive file permissions (0600) on Unix systems."""
+    """Set restrictive file permissions (0600) on Unix systems.
+
+    On Windows, file permissions are managed by the OS user-profile ACLs.
+    """
     if sys.platform != "win32":
         os.chmod(path, 0o600)
 
@@ -41,6 +46,7 @@ def save_config(config):
     _ensure_cred_dir()
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+    _set_file_permissions(CONFIG_FILE)
 
 
 def _migrate_legacy_env():
@@ -121,8 +127,9 @@ def run_auth():
 
     print()
     print("Credentials saved. Starting Yahoo OAuth flow...")
-    print("Note: You can also set YAHOO_CONSUMER_KEY and YAHOO_CONSUMER_SECRET")
-    print("environment variables to avoid storing secrets on disk.")
+    print("Tip: Set YAHOO_CONSUMER_KEY and YAHOO_CONSUMER_SECRET as environment")
+    print("variables to skip interactive setup. Note: credentials are still written")
+    print("to oauth2.json for token management (file permissions set to 0600 on Unix).")
     print("A browser window will open for authorization.")
     print()
 

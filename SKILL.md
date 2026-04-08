@@ -352,7 +352,7 @@ All commands support `--format discord` which wraps text output in code blocks.
 
 ## Credential Storage
 
-**Preferred: Environment variables.** Set `YAHOO_CONSUMER_KEY` and `YAHOO_CONSUMER_SECRET` via OpenClaw config or your shell environment. The skill will use these automatically — no need to run `auth`.
+**Preferred: Environment variables.** Set `YAHOO_CONSUMER_KEY` and `YAHOO_CONSUMER_SECRET` via OpenClaw config or your shell environment. The skill will use these automatically — no need to run `auth`. Note: credentials are still written to `oauth2.json` on disk because the underlying `yahoo_oauth` library requires a file for token management. File permissions are set to 0600 on Unix.
 
 **Alternative: Interactive setup.** Run the `auth` command to enter credentials interactively. Tokens are stored in `~/.openclaw/credentials/yahoo-fantasy/`:
 - `oauth2.json` — OAuth consumer key/secret and tokens (managed by yahoo_oauth, file permissions set to 0600 on Unix)
