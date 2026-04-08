@@ -149,7 +149,7 @@ python3 /home/claw/.openclaw/workspace/skills/yahoo-fantasy-baseball/yahoo-fanta
 ```
 
 Three analysis categories:
-1. **Lineup changes** — optimal batter assignment via constraint solver (position-aware, fills restrictive slots before UTIL). Outputs every individual position move needed (e.g., `Adames: BN → SS`, `Fitzgerald: SS → UTIL`, `Cronenworth: 1B → BN`). Also checks confirmed MLB batting lineups — players confirmed not in their team's lineup are treated as unavailable (score 0) and will be moved to bench. Players whose games have already started are locked in place (Yahoo locks roster slots at first pitch) and excluded from the solver.
+1. **Lineup changes** — optimal batter assignment via constraint solver (position-aware, fills restrictive slots before UTIL). Outputs grouped swap instructions showing who starts, who gets benched, and any intermediate position reshuffles needed (e.g., a UTIL player sliding to 1B to make room). Also checks confirmed MLB batting lineups — players confirmed not in their team's lineup are treated as unavailable (score 0) and will be moved to bench. Players whose games have already started are locked in place (Yahoo locks roster slots at first pitch) and excluded from the solver.
 2. **Pitcher rotation** — probable starters on bench, active pitchers on off days. Only alerts for games that haven't started yet.
 3. **IL management** — players with IL designations (IL, IL10, IL15, IL60) not in IL slots, cleared players still in IL. DTD players are excluded since Yahoo does not allow moving them to IL.
 
@@ -273,15 +273,18 @@ Today — Team Name
 Roster Optimization Suggestions
 ==================================================
 
-  LINEUP CHANGES (3 moves)
-    Jake Burger: BN → 3B
-      (MIA vs ATL, score: 18.3)
-    Mookie Betts: SS → BN
-      (LAD, score: 12.0)
-      📅  team off today
-    Josh Smith: 3B → BN
-      (TEX vs SEA, score: 9.2)
-      ⚠️  not in confirmed MLB lineup
+  LINEUP CHANGES (2 swaps)
+
+    Swap 1 — 3B
+      ▶ Start Jake Burger (MIA vs ATL, score: 18.3)
+      ▼ Bench Josh Smith (TEX vs SEA, score: 9.2)
+        ⚠️  not in confirmed MLB lineup
+
+    Swap 2 — SS / UTIL
+      ▶ Start Willy Adames at SS (SF vs PHI, score: 35.0)
+      ↔ Move Mookie Betts from SS → UTIL
+      ▼ Bench Tyler Fitzgerald (SF, score: 12.0)
+        📅  team off today
 
   PITCHER ROTATION (1 alerts)
     Gerrit Cole (NYY) is a probable starter today but is on the bench.
@@ -289,7 +292,7 @@ Roster Optimization Suggestions
   IL MANAGEMENT (1 suggested)
     Move Zack Wheeler (IL-60) from SP slot to IL to free a roster spot.
 
-Total: 5 suggestion(s)
+Total: 4 suggestion(s)
 ```
 
 Players on teams whose games are already in progress or finished are locked and excluded from optimization — they will not appear in the move list.

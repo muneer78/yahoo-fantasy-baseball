@@ -1227,19 +1227,90 @@ def _diff_lineup_moves(optimal, roster, teams_playing, opponents, sitting_player
             "reason": reason,
         })
 
-    # Filter out active→active reshuffles — only BN↔active moves matter
-    moves = [m for m in moves if m["from_slot"] == "BN" or m["to_slot"] == "BN"]
-
-    # Sort: BN→active first, active→BN last
-    def _sort_key(m):
-        if m["from_slot"] == "BN":
-            return (0, m["player"])
-        if m["to_slot"] == "BN":
-            return (2, m["player"])
-        return (1, m["player"])
-
-    moves.sort(key=_sort_key)
     return moves
+
+
+def _group_moves_into_swaps(moves):
+    """Group flat moves into swap groups by following slot chains.
+
+    Each group represents a single logical swap action: a bench player
+    enters an active slot, possibly triggering a chain of reshuffles,
+    ending with someone going to the bench.
+    """
+    # Build lookup: which move vacates each slot, which move fills each slot
+    slot_vacated_by = {}   # slot -> move (the move where someone LEAVES this slot)
+    slot_filled_by = {}    # slot -> move (the move where someone ENTERS this slot)
+
+    for m in moves:
+        if m["from_slot"] != "BN":
+            slot_vacated_by[m["from_slot"]] = m
+        if m["to_slot"] != "BN":
+            slot_filled_by[m["to_slot"]] = m
+
+    used = set()
+    groups = []
+
+    # Build chains starting from each BN → active anchor
+    for m in moves:
+        if m["from_slot"] == "BN" and id(m) not in used:
+            group = {"start": [m], "bench": [], "reshuffle": []}
+            used.add(id(m))
+            slots_involved = [m["to_slot"]]
+
+            # Follow the chain: who vacated the slot we're filling?
+            target_slot = m["to_slot"]
+            while target_slot in slot_vacated_by:
+                displaced = slot_vacated_by[target_slot]
+                if id(displaced) in used:
+                    break
+                used.add(id(displaced))
+                if displaced["to_slot"] == "BN":
+                    group["bench"].append(displaced)
+                else:
+                    group["reshuffle"].append(displaced)
+                    slots_involved.append(displaced["to_slot"])
+                    target_slot = displaced["to_slot"]
+                    continue
+                break
+
+            group["label"] = " / ".join(slots_involved) if len(slots_involved) > 1 else slots_involved[0]
+            groups.append(group)
+
+    # Handle orphan moves not part of any chain
+    for m in moves:
+        if id(m) not in used:
+            used.add(id(m))
+            if m["to_slot"] == "BN":
+                # Pure benching (no replacement)
+                groups.append({
+                    "label": m["from_slot"],
+                    "start": [],
+                    "bench": [m],
+                    "reshuffle": [],
+                })
+            elif m["from_slot"] == "BN":
+                # Pure promotion (empty slot)
+                groups.append({
+                    "label": m["to_slot"],
+                    "start": [m],
+                    "bench": [],
+                    "reshuffle": [],
+                })
+            else:
+                # Standalone reshuffle
+                groups.append({
+                    "label": f"{m['from_slot']} / {m['to_slot']}",
+                    "start": [],
+                    "bench": [],
+                    "reshuffle": [m],
+                })
+
+    # Tag each move with its swap_group_index for JSON consumers
+    for idx, group in enumerate(groups):
+        for m in group["start"] + group["reshuffle"] + group["bench"]:
+            m["swap_group"] = idx
+
+    return groups
 
 
 def cmd_optimize(args):
@@ -1385,6 +1456,7 @@ def cmd_optimize(args):
 
     optimal = _solve_optimal_lineup(moveable_batters, available_slots, unlocked_teams, sitting_ids)
     suggestions["moves"] = _diff_lineup_moves(optimal, roster, unlocked_teams, opponents, sitting_ids, locked_teams=locked_teams)
+    suggestions["swap_groups"] = _group_moves_into_swaps(suggestions["moves"])
 
     # 2. Pitcher rotation alerts
     for player in roster:
