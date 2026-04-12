@@ -982,8 +982,10 @@ def _find_sitting_players(roster, confirmed_lineups, teams_playing):
 
     for player in roster:
         slot = formatters._player_selected_position(player).upper()
-        # Only check active position players (not bench, IL, or pitchers)
-        if slot in IL_SLOTS or slot in BENCH_SLOTS:
+        # Skip IL players and pitchers — check both active AND bench batters
+        # so the optimizer knows not to suggest starting bench players who
+        # are confirmed out of the real MLB lineup.
+        if slot in IL_SLOTS:
             continue
         pos_type = player.get("position_type", "B")
         if pos_type == "P":
