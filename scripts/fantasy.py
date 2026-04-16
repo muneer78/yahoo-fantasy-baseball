@@ -1439,12 +1439,12 @@ def cmd_optimize(args):
         if p.get("position_type", "B") != "B":
             continue
         team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+        slot = formatters._player_selected_position(p).upper()
         if team in locked_teams:
-            # Locked active player: reserve their slot
-            slot = formatters._player_selected_position(p).upper()
             if slot not in _NON_ACTIVE_SLOTS and slot not in _PITCHER_SLOTS:
                 locked_batter_slots.append(slot)
-            # Locked bench player: stays on bench, not added to solver
+            continue
+        if slot in BENCH_SLOTS and team not in teams_playing:
             continue
         moveable_batters.append(p)
 
