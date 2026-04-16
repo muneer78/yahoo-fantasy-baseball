@@ -1299,13 +1299,10 @@ def _group_moves_into_swaps(moves):
                     "reshuffle": [],
                 })
             else:
-                # Standalone reshuffle
-                groups.append({
-                    "label": f"{m['from_slot']} / {m['to_slot']}",
-                    "start": [],
-                    "bench": [],
-                    "reshuffle": [m],
-                })
+                pass  # skip orphan active→active reshuffles
+
+    # Filter out any groups that don't involve the bench
+    groups = [g for g in groups if g["start"] or g["bench"]]
 
     # Tag each move with its swap_group_index for JSON consumers
     for idx, group in enumerate(groups):
