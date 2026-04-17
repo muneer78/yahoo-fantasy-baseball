@@ -1232,6 +1232,156 @@ def _diff_lineup_moves(optimal, roster, teams_playing, opponents, sitting_player
     return moves
 
 
+def _count_active_pitcher_slots(roster):
+    """Infer active pitcher slot counts from the current roster.
+
+    Returns a flat list like ["SP", "SP", "RP", "RP", "P", "P", "P", "P"].
+    """
+    slots = []
+    for player in roster:
+        slot = formatters._player_selected_position(player).upper()
+        if slot in _PITCHER_SLOTS:
+            slots.append(slot)
+    return slots
+
+
+def _solve_pitcher_lineup(pitchers, available_slots, unlocked_teams, teams_playing,
+                          probable_pitchers):
+    """Greedy priority-based pitcher slot assignment.
+
+    Returns dict of {player_id: assigned_slot} for pitchers that should be
+    in active slots.  Minimizes unnecessary reshuffles by preferring each
+    pitcher's current slot when available.
+    """
+    import mlb_client
+
+    # Compute priority for each pitcher
+    scored = []
+    for p in pitchers:
+        positions = formatters._player_position(p).upper()
+        team_abbr = mlb_client.normalize_team_abbr(formatters._player_team(p))
+        status = formatters._player_status(p).upper()
+        name = formatters._player_name(p)
+        opt_score = p.get("_opt_score", 0)
+        current_slot = formatters._player_selected_position(p).upper()
+
+        is_probable = (team_abbr in probable_pitchers and
+                       _pitcher_names_match(name, probable_pitchers[team_abbr]))
+
+        if is_probable and team_abbr in unlocked_teams:
+            priority = 100
+        elif "RP" in positions and team_abbr in teams_playing and not status and team_abbr in unlocked_teams:
+            priority = 50
+        elif team_abbr in teams_playing and team_abbr in unlocked_teams and not status:
+            priority = 10
+        elif team_abbr in teams_playing and team_abbr in unlocked_teams:
+            priority = 5  # playing but has a status like DTD
+        else:
+            priority = 0  # team off today or game locked
+
+        scored.append((p, priority, opt_score, positions, current_slot))
+
+    # Sort by priority desc, then opt_score desc
+    scored.sort(key=lambda x: (-x[1], -x[2]))
+
+    remaining_slots = list(available_slots)
+    assignment = {}
+
+    for p, priority, opt_score, positions, current_slot in scored:
+        pid = formatters._player_id(p)
+        assigned = None
+
+        # Prefer current slot if it's available (minimizes reshuffles)
+        if current_slot in _PITCHER_SLOTS and current_slot in remaining_slots:
+            assigned = current_slot
+        else:
+            # Try any eligible pitcher slot
+            if "P" in remaining_slots:
+                assigned = "P"
+            elif "RP" in positions and "RP" in remaining_slots:
+                assigned = "RP"
+            elif "SP" in positions and "SP" in remaining_slots:
+                assigned = "SP"
+
+        if assigned:
+            remaining_slots.remove(assigned)
+            assignment[pid] = assigned
+
+    return assignment
+
+
+def _diff_pitcher_moves(optimal, roster, unlocked_teams, opponents, teams_playing,
+                        probable_pitchers, locked_teams=None):
+    """Compare optimal pitcher assignment to current lineup, produce move list."""
+    import mlb_client
+
+    player_by_id = {}
+    current = {}  # pid -> current_slot (pitcher slots + BN)
+    for p in roster:
+        pid = formatters._player_id(p)
+        player_by_id[pid] = p
+        slot = formatters._player_selected_position(p).upper()
+        if p.get("position_type", "B") != "P":
+            continue
+        if slot not in _PITCHER_SLOTS and slot != "BN":
+            continue  # IL etc.
+        if locked_teams:
+            team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+            if team in locked_teams:
+                continue
+        current[pid] = slot
+
+    # Pitchers not in optimal assignment go to BN
+    optimal_full = dict(optimal)
+    for pid in current:
+        if pid not in optimal_full and current[pid] != "BN":
+            optimal_full[pid] = "BN"
+
+    moves = []
+    for pid, cur_slot in current.items():
+        new_slot = optimal_full.get(pid, "BN")
+        if cur_slot == new_slot:
+            continue
+        p = player_by_id.get(pid)
+        if not p:
+            continue
+        team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+        opp = opponents.get(team, "")
+        positions = formatters._player_position(p).upper()
+        name = formatters._player_name(p)
+
+        reason = ""
+        if new_slot == "BN":
+            if team not in teams_playing:
+                reason = "team off today"
+            elif team in probable_pitchers and _pitcher_names_match(name, probable_pitchers[team]):
+                pass  # probable starter being benched shouldn't happen, but no special reason
+            else:
+                reason = "not starting today"
+        elif cur_slot == "BN":
+            is_probable = (team in probable_pitchers and
+                           _pitcher_names_match(name, probable_pitchers[team]))
+            if is_probable:
+                reason = "probable starter today"
+            elif "RP" in positions:
+                reason = "relief pitcher — team playing today"
+            else:
+                reason = "team playing today"
+
+        moves.append({
+            "player": name,
+            "player_id": pid,
+            "team": team,
+            "opponent": opp,
+            "from_slot": cur_slot,
+            "to_slot": new_slot,
+            "score": p.get("_opt_score", 0),
+            "reason": reason,
+        })
+
+    return moves
+
+
 def _group_moves_into_swaps(moves):
     """Group flat moves into swap groups by following slot chains.
 
@@ -1345,7 +1495,8 @@ def cmd_optimize(args):
     IL_SLOTS = {"IL", "IL+", "DL", "DL+"}
     BENCH_SLOTS = {"BN"}
 
-    suggestions = {"moves": [], "pitcher_alerts": [], "il_moves": []}
+    suggestions = {"moves": [], "pitcher_alerts": [], "pitcher_moves": [],
+                    "pitcher_swap_groups": [], "il_moves": []}
 
     # Categorize players
     active_players = []  # In active slots
@@ -1457,38 +1608,52 @@ def cmd_optimize(args):
     suggestions["moves"] = _diff_lineup_moves(optimal, roster, unlocked_teams, opponents, sitting_ids, locked_teams=locked_teams)
     suggestions["swap_groups"] = _group_moves_into_swaps(suggestions["moves"])
 
-    # 2. Pitcher rotation alerts
+    # 2. Pitcher lineup optimization
+    pitcher_slots = _count_active_pitcher_slots(roster)
+    locked_pitcher_slots = []
+    moveable_pitchers = []
+    for p in active_players + bench_players:
+        if p.get("position_type", "B") != "P":
+            continue
+        team = mlb_client.normalize_team_abbr(formatters._player_team(p))
+        slot = formatters._player_selected_position(p).upper()
+        if team in locked_teams:
+            if slot in _PITCHER_SLOTS:
+                locked_pitcher_slots.append(slot)
+            continue
+        moveable_pitchers.append(p)
+
+    available_p_slots = list(pitcher_slots)
+    for s in locked_pitcher_slots:
+        if s in available_p_slots:
+            available_p_slots.remove(s)
+
+    pitcher_optimal = _solve_pitcher_lineup(
+        moveable_pitchers, available_p_slots, unlocked_teams, teams_playing,
+        probable_pitchers)
+    pitcher_raw_moves = _diff_pitcher_moves(
+        pitcher_optimal, roster, unlocked_teams, opponents, teams_playing,
+        probable_pitchers, locked_teams)
+    suggestions["pitcher_moves"] = pitcher_raw_moves
+    suggestions["pitcher_swap_groups"] = _group_moves_into_swaps(pitcher_raw_moves)
+
+    # Alerts for locked edge cases (e.g., probable starter benched but game locked)
     for player in roster:
         slot = formatters._player_selected_position(player).upper()
         team_abbr = mlb_client.normalize_team_abbr(formatters._player_team(player))
         name = formatters._player_name(player)
         positions = formatters._player_position(player).upper()
-
         if "SP" not in positions and "RP" not in positions:
             continue
-
-        # Check if this pitcher is a probable starter
-        is_probable = False
-        if team_abbr in probable_pitchers:
-            if _pitcher_names_match(name, probable_pitchers[team_abbr]):
-                is_probable = True
-
-        if is_probable and slot == "BN" and team_abbr in unlocked_teams:
-            # Probable starter is on bench and game hasn't started yet
+        is_probable = (team_abbr in probable_pitchers and
+                       _pitcher_names_match(name, probable_pitchers[team_abbr]))
+        if is_probable and slot == "BN" and team_abbr in locked_teams:
             suggestions["pitcher_alerts"].append({
-                "type": "probable_starter_benched",
+                "type": "probable_starter_benched_locked",
                 "player": name,
                 "player_id": formatters._player_id(player),
                 "team": team_abbr,
-                "message": f"{name} ({team_abbr}) is a probable starter today but is on the bench.",
-            })
-        elif not is_probable and slot in ("SP", "P") and team_abbr not in teams_playing:
-            suggestions["pitcher_alerts"].append({
-                "type": "active_pitcher_not_playing",
-                "player": name,
-                "player_id": formatters._player_id(player),
-                "team": team_abbr,
-                "message": f"{name} ({team_abbr}) is in an active pitching slot but their team is off today.",
+                "message": f"{name} ({team_abbr}) is a probable starter but is benched — game already locked.",
             })
 
     # 3. IL slot management
