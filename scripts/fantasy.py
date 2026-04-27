@@ -1609,6 +1609,10 @@ def cmd_optimize(args):
     optimal = _solve_optimal_lineup(moveable_batters, available_slots, unlocked_teams, sitting_ids)
     suggestions["moves"] = _diff_lineup_moves(optimal, roster, unlocked_teams, opponents, sitting_ids, locked_teams=locked_teams)
     suggestions["swap_groups"] = _group_moves_into_swaps(suggestions["moves"])
+    # Drop moves that didn't make it into a bench-involving swap group (e.g.
+    # pure active↔active reshuffles). Keeps JSON in sync with the text view,
+    # which renders only swap_groups.
+    suggestions["moves"] = [m for m in suggestions["moves"] if "swap_group" in m]
 
     # 2. Pitcher lineup optimization
     pitcher_slots = _count_active_pitcher_slots(roster)
@@ -1638,6 +1642,7 @@ def cmd_optimize(args):
         probable_pitchers, locked_teams)
     suggestions["pitcher_moves"] = pitcher_raw_moves
     suggestions["pitcher_swap_groups"] = _group_moves_into_swaps(pitcher_raw_moves)
+    suggestions["pitcher_moves"] = [m for m in suggestions["pitcher_moves"] if "swap_group" in m]
 
     # Alerts for locked edge cases (e.g., probable starter benched but game locked)
     for player in roster:
