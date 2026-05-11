@@ -7,7 +7,7 @@ description: >
   Read-only — no roster modifications. Use when the user asks about their
   fantasy baseball team, who to start or sit, league standings, available
   free agents, or injury updates.
-metadata: {"openclaw":{"emoji":"⚾","requires":{"bins":["python3"],"env":["YAHOO_CONSUMER_KEY","YAHOO_CONSUMER_SECRET"]}}}
+metadata: {"openclaw":{"emoji":"⚾","requires":{"bins":["python3"]}}}
 ---
 
 # Yahoo Fantasy Baseball
