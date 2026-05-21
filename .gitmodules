@@ -1,0 +1,3 @@
+[submodule "yahoo-repo"]
+	path = yahoo-repo
+	url = https://github.com/muneer78/yahoo-fantasy-baseball
