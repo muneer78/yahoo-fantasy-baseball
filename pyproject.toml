@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "yahoo-fantasy-baseball"
+version = "1.0.0"
+description = "Yahoo Fantasy Baseball CLI"
+requires-python = ">=3.10"
+dependencies = [
+    "yahoo_fantasy_api==2.12.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
